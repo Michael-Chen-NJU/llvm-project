@@ -104,6 +104,7 @@ class CXXRecordDecl;
 class DiagnosticsEngine;
 class DynTypedNodeList;
 class Expr;
+class ExplicitInstantiationDecl;
 enum class FloatModeKind;
 class GlobalDecl;
 class IdentifierTable;
@@ -389,8 +390,9 @@ class ASTContext : public RefCountedBase<ASTContext> {
   mutable llvm::DenseMap<const CXXDestructorDecl *, FunctionDecl *>
       GlobalArrayOperatorDeletesForVirtualDtor;
 
-  /// To remember which types did require a vector deleting dtor.
-  llvm::DenseSet<const CXXRecordDecl *> RequireVectorDeletingDtor;
+  /// To remember for which types we met new[] call, these potentially require a
+  /// vector deleting dtor.
+  llvm::DenseSet<const CXXRecordDecl *> MaybeRequireVectorDeletingDtor;
 
   /// The next string literal "version" to allocate during constant evaluation.
   /// This is used to distinguish between repeated evaluations of the same
@@ -495,6 +497,12 @@ class ASTContext : public RefCountedBase<ASTContext> {
 
   /// The type for the C ucontext_t type.
   TypeDecl *ucontext_tDecl = nullptr;
+
+  /// The type for the C fexcept_t type.
+  TypeDecl *fexcept_tDecl = nullptr;
+
+  /// The type for the C fenv_t type.
+  TypeDecl *fenv_tDecl = nullptr;
 
   /// Type for the Block descriptor for Blocks CodeGen.
   ///
@@ -654,6 +662,12 @@ private:
     InstantiatedFromUsingShadowDecl;
 
   llvm::DenseMap<FieldDecl *, FieldDecl *> InstantiatedFromUnnamedFieldDecl;
+
+  /// Maps a canonical specialization Decl to all ExplicitInstantiationDecls
+  /// that reference it (declarations and definitions).
+  llvm::DenseMap<const NamedDecl *,
+                 llvm::TinyPtrVector<ExplicitInstantiationDecl *>>
+      ExplicitInstantiations;
 
   /// Mapping that stores the methods overridden by a given C++
   /// member function.
@@ -1133,6 +1147,14 @@ public:
   /// Erase the attributes corresponding to the given declaration.
   void eraseDeclAttrs(const Decl *D);
 
+  /// Get all ExplicitInstantiationDecls for a given specialization.
+  ArrayRef<ExplicitInstantiationDecl *>
+  getExplicitInstantiationDecls(const NamedDecl *Spec) const;
+
+  /// Add an ExplicitInstantiationDecl for a given specialization.
+  void addExplicitInstantiationDecl(const NamedDecl *Spec,
+                                    ExplicitInstantiationDecl *EID);
+
   /// If this variable is an instantiated static data member of a
   /// class template specialization, returns the templated static data member
   /// from which it was instantiated.
@@ -1267,6 +1289,8 @@ public:
   bool isInSameModule(const Module *M1, const Module *M2) const;
 
   TranslationUnitDecl *getTranslationUnitDecl() const {
+    assert(TUDecl && "TUDecl might have been reset by 'cleanup' likely because "
+                     "'CodeGenOpts.ClearASTBeforeBackend' was set.");
     assert(TUDecl->getMostRecentDecl() == TUDecl &&
            "The active TU is not current one!");
     return TUDecl->getMostRecentDecl();
@@ -1367,7 +1391,7 @@ public:
   /// This does not include extern shared variables used by device host
   /// functions as addresses of shared variables are per warp, therefore
   /// cannot be accessed by host code.
-  llvm::DenseSet<const VarDecl *> CUDADeviceVarODRUsedByHost;
+  llvm::SetVector<const VarDecl *> CUDADeviceVarODRUsedByHost;
 
   /// Keep track of CUDA/HIP external kernels or device variables ODR-used by
   /// host code. SetVector is used to maintain the order.
@@ -1839,12 +1863,6 @@ private:
   QualType getFunctionTypeInternal(QualType ResultTy, ArrayRef<QualType> Args,
                                    const FunctionProtoType::ExtProtoInfo &EPI,
                                    bool OnlyWantCanonical) const;
-  QualType
-  getAutoTypeInternal(QualType DeducedType, AutoTypeKeyword Keyword,
-                      bool IsDependent, bool IsPack = false,
-                      TemplateDecl *TypeConstraintConcept = nullptr,
-                      ArrayRef<TemplateArgument> TypeConstraintArgs = {},
-                      bool IsCanon = false) const;
 
 public:
   QualType getTypeDeclType(ElaboratedTypeKeyword Keyword,
@@ -1986,8 +2004,7 @@ public:
   QualType getSubstBuiltinTemplatePack(const TemplateArgument &ArgPack);
 
   QualType
-  getTemplateTypeParmType(unsigned Depth, unsigned Index,
-                          bool ParameterPack,
+  getTemplateTypeParmType(int Depth, int Index, bool ParameterPack,
                           TemplateTypeParmDecl *ParmDecl = nullptr) const;
 
   QualType getCanonicalTemplateSpecializationType(
@@ -2084,8 +2101,7 @@ public:
 
   /// C++11 deduced auto type.
   QualType
-  getAutoType(QualType DeducedType, AutoTypeKeyword Keyword, bool IsDependent,
-              bool IsPack = false,
+  getAutoType(DeducedKind DK, QualType DeducedAsType, AutoTypeKeyword Keyword,
               TemplateDecl *TypeConstraintConcept = nullptr,
               ArrayRef<TemplateArgument> TypeConstraintArgs = {}) const;
 
@@ -2100,17 +2116,11 @@ public:
   QualType getUnconstrainedType(QualType T) const;
 
   /// C++17 deduced class template specialization type.
-  QualType getDeducedTemplateSpecializationType(ElaboratedTypeKeyword Keyword,
-                                                TemplateName Template,
-                                                QualType DeducedType,
-                                                bool IsDependent) const;
+  QualType getDeducedTemplateSpecializationType(DeducedKind DK,
+                                                QualType DeducedAsType,
+                                                ElaboratedTypeKeyword Keyword,
+                                                TemplateName Template) const;
 
-private:
-  QualType getDeducedTemplateSpecializationTypeInternal(
-      ElaboratedTypeKeyword Keyword, TemplateName Template,
-      QualType DeducedType, bool IsDependent, QualType Canon) const;
-
-public:
   /// Return the unique type for "size_t" (C99 7.17), defined in
   /// <stddef.h>.
   ///
@@ -2343,6 +2353,30 @@ public:
     if (ucontext_tDecl)
       return getTypeDeclType(ElaboratedTypeKeyword::None,
                              /*Qualifier=*/std::nullopt, ucontext_tDecl);
+    return QualType();
+  }
+
+  /// Set the type for the C fexcept_t type.
+  void setfexcept_tDecl(TypeDecl *fexcept_tDecl) {
+    this->fexcept_tDecl = fexcept_tDecl;
+  }
+
+  /// Retrieve the C fexcept_t type.
+  QualType getfexcept_tType() const {
+    if (fexcept_tDecl)
+      return getTypeDeclType(ElaboratedTypeKeyword::None,
+                             /*Qualifier=*/std::nullopt, fexcept_tDecl);
+    return QualType();
+  }
+
+  /// Set the type for the C fenv_t type.
+  void setfenv_tDecl(TypeDecl *fenv_tDecl) { this->fenv_tDecl = fenv_tDecl; }
+
+  /// Retrieve the C fenv_t type.
+  QualType getfenv_tType() const {
+    if (fenv_tDecl)
+      return getTypeDeclType(ElaboratedTypeKeyword::None,
+                             /*Qualifier=*/std::nullopt, fenv_tDecl);
     return QualType();
   }
 
@@ -2626,7 +2660,10 @@ public:
     GE_Missing_setjmp,
 
     /// Missing a type from <ucontext.h>
-    GE_Missing_ucontext
+    GE_Missing_ucontext,
+
+    /// Missing a type from <fenv.h>
+    GE_Missing_fenv
   };
 
   QualType DecodeTypeStr(const char *&Str, const ASTContext &Context,
@@ -3082,6 +3119,10 @@ public:
   /// types, values, and templates.
   TemplateName getCanonicalTemplateName(TemplateName Name,
                                         bool IgnoreDeduced = false) const;
+
+  /// Return the default argument of a template parameter, if one exists.
+  const TemplateArgument *
+  getDefaultTemplateArgumentOrNone(const NamedDecl *P) const;
 
   /// Determine whether the given template names refer to the same
   /// template.
@@ -3561,8 +3602,8 @@ public:
                                           OperatorDeleteKind K) const;
   bool dtorHasOperatorDelete(const CXXDestructorDecl *Dtor,
                              OperatorDeleteKind K) const;
-  void setClassNeedsVectorDeletingDestructor(const CXXRecordDecl *RD);
-  bool classNeedsVectorDeletingDestructor(const CXXRecordDecl *RD);
+  void setClassMaybeNeedsVectorDeletingDestructor(const CXXRecordDecl *RD);
+  bool classMaybeNeedsVectorDeletingDestructor(const CXXRecordDecl *RD);
 
   /// Retrieve the context for computing mangling numbers in the given
   /// DeclContext.

@@ -1277,10 +1277,10 @@ bool llvm::TryToSimplifyUncondBranchFromEmptyBlock(BasicBlock *BB,
   // |       v
   // |    for.body <---- (md2)
   // |_______|  |______|
-  if (Instruction *TI = BB->getTerminator())
+  if (Instruction *TI = BB->getTerminatorOrNull())
     if (TI->hasNonDebugLocLoopMetadata())
       for (BasicBlock *Pred : predecessors(BB))
-        if (Instruction *PredTI = Pred->getTerminator())
+        if (Instruction *PredTI = Pred->getTerminatorOrNull())
           if (PredTI->hasNonDebugLocLoopMetadata())
             return false;
 
@@ -1348,7 +1348,7 @@ bool llvm::TryToSimplifyUncondBranchFromEmptyBlock(BasicBlock *BB,
   // If the unconditional branch we replaced contains non-debug llvm.loop
   // metadata, we add the metadata to the branch instructions in the
   // predecessors.
-  if (Instruction *TI = BB->getTerminator())
+  if (Instruction *TI = BB->getTerminatorOrNull())
     if (TI->hasNonDebugLocLoopMetadata()) {
       MDNode *LoopMD = TI->getMetadata(LLVMContext::MD_loop);
       for (BasicBlock *Pred : predecessors(BB))
@@ -1363,7 +1363,7 @@ bool llvm::TryToSimplifyUncondBranchFromEmptyBlock(BasicBlock *BB,
       Succ->takeName(BB);
 
     // Clear the successor list of BB to match updates applying to DTU later.
-    if (BB->getTerminator())
+    if (BB->hasTerminator())
       BB->back().eraseFromParent();
 
     new UnreachableInst(BB->getContext(), BB);
@@ -2658,13 +2658,12 @@ BasicBlock *llvm::changeToInvokeAndSplitBasicBlock(CallInst *CI,
   return Split;
 }
 
-static bool markAliveBlocks(Function &F,
-                            SmallPtrSetImpl<BasicBlock *> &Reachable,
+static bool markAliveBlocks(Function &F, SmallVectorImpl<bool> &Reachable,
                             DomTreeUpdater *DTU = nullptr) {
   SmallVector<BasicBlock*, 128> Worklist;
   BasicBlock *BB = &F.front();
   Worklist.push_back(BB);
-  Reachable.insert(BB);
+  Reachable[BB->getNumber()] = true;
   bool Changed = false;
   do {
     BB = Worklist.pop_back_val();
@@ -2770,6 +2769,7 @@ static bool markAliveBlocks(Function &F,
           BasicBlock *UnreachableNormalDest = BasicBlock::Create(
               Ctx, OrigNormalDest->getName() + ".unreachable",
               II->getFunction(), OrigNormalDest);
+          Reachable.resize(II->getFunction()->getMaxBlockNumber());
           auto *UI = new UnreachableInst(Ctx, UnreachableNormalDest);
           UI->setDebugLoc(DebugLoc::getTemporary());
           II->setNormalDest(UnreachableNormalDest);
@@ -2850,9 +2850,12 @@ static bool markAliveBlocks(Function &F,
     }
 
     Changed |= ConstantFoldTerminator(BB, true, nullptr, DTU);
-    for (BasicBlock *Successor : successors(BB))
-      if (Reachable.insert(Successor).second)
+    for (BasicBlock *Successor : successors(BB)) {
+      if (!Reachable[Successor->getNumber()]) {
         Worklist.push_back(Successor);
+        Reachable[Successor->getNumber()] = true;
+      }
+    }
   } while (!Worklist.empty());
   return Changed;
 }
@@ -2897,20 +2900,14 @@ Instruction *llvm::removeUnwindEdge(BasicBlock *BB, DomTreeUpdater *DTU) {
 /// otherwise.
 bool llvm::removeUnreachableBlocks(Function &F, DomTreeUpdater *DTU,
                                    MemorySSAUpdater *MSSAU) {
-  SmallPtrSet<BasicBlock *, 16> Reachable;
+  SmallVector<bool, 16> Reachable(F.getMaxBlockNumber());
   bool Changed = markAliveBlocks(F, Reachable, DTU);
-
-  // If there are unreachable blocks in the CFG...
-  if (Reachable.size() == F.size())
-    return Changed;
-
-  assert(Reachable.size() < F.size());
 
   // Are there any blocks left to actually delete?
   SmallSetVector<BasicBlock *, 8> BlocksToRemove;
   for (BasicBlock &BB : F) {
     // Skip reachable basic blocks
-    if (Reachable.count(&BB))
+    if (Reachable[BB.getNumber()])
       continue;
     // Skip already-deleted blocks
     if (DTU && DTU->isBBPendingDeletion(&BB))
@@ -3910,12 +3907,6 @@ bool llvm::canReplaceOperandWithVariable(const Instruction *I, unsigned OpIdx) {
   // instructions.
   if (Op->isSwiftError())
     return false;
-
-  // Protected pointer field loads/stores should be paired with the intrinsic
-  // to avoid unnecessary address escapes.
-  if (auto *II = dyn_cast<IntrinsicInst>(Op))
-    if (II->getIntrinsicID() == Intrinsic::protected_field_ptr)
-      return false;
 
   // Cannot replace alloca argument with phi/select.
   if (I->isLifetimeStartOrEnd())

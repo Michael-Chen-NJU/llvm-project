@@ -24,6 +24,7 @@
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/CycleInfo.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/Dominators.h"
@@ -346,6 +347,8 @@ bool llvm::MergeBlockIntoPredecessor(BasicBlock *BB, DomTreeUpdater *DTU,
   if (PredecessorWithTwoSuccessors) {
     // Delete the unconditional branch from BB.
     BB->back().eraseFromParent();
+    // Add unreachable to now empty BB.
+    new UnreachableInst(BB->getContext(), BB);
 
     // Update branch in the predecessor.
     PredBB_BI->setSuccessor(FallThruPath, NewSucc);
@@ -355,6 +358,8 @@ bool llvm::MergeBlockIntoPredecessor(BasicBlock *BB, DomTreeUpdater *DTU,
 
     // Move terminator instruction.
     BB->back().moveBeforePreserving(*PredBB, PredBB->end());
+    // Add unreachable to now empty BB.
+    new UnreachableInst(BB->getContext(), BB);
 
     // Terminator may be a memory accessing instruction too.
     if (MSSAU)
@@ -362,8 +367,6 @@ bool llvm::MergeBlockIntoPredecessor(BasicBlock *BB, DomTreeUpdater *DTU,
               MSSAU->getMemorySSA()->getMemoryAccess(PredBB->getTerminator())))
         MSSAU->moveToPlace(MUD, PredBB, MemorySSA::End);
   }
-  // Add unreachable to now empty BB.
-  new UnreachableInst(BB->getContext(), BB);
 
   // Inherit predecessors name if it exists.
   if (!PredBB->hasName())
@@ -1054,6 +1057,15 @@ BasicBlock *llvm::SplitBlock(BasicBlock *Old, BasicBlock::iterator SplitPt,
   return SplitBlockImpl(Old, SplitPt, DTU, /*DT=*/nullptr, LI, MSSAU, BBName);
 }
 
+static bool hasReachableLoopEntryToHeader(const Loop &L,
+                                          const DominatorTree &DT) {
+  for (const BasicBlock *Pred : predecessors(L.getHeader()))
+    if (!L.contains(Pred) && DT.isReachableFromEntry(Pred))
+      return true;
+
+  return false;
+}
+
 /// Update DominatorTree, LoopInfo, and LCCSA analysis information.
 /// Invalidates DFS Numbering when DTU or DT is provided.
 static void UpdateAnalysisInformation(BasicBlock *OldBB, BasicBlock *NewBB,
@@ -1163,8 +1175,15 @@ static void UpdateAnalysisInformation(BasicBlock *OldBB, BasicBlock *NewBB,
       InnermostPredLoop->addBasicBlockToLoop(NewBB, *LI);
   } else {
     L->addBasicBlockToLoop(NewBB, *LI);
-    if (SplitMakesNewLoopHeader)
-      L->moveToHeader(NewBB);
+    if (SplitMakesNewLoopHeader) {
+      // The old header might still have a loop entry. If so the loop becomes
+      // irreducible and must be erased. Otherwise the NewBB becomes the loop
+      // header.
+      if (hasReachableLoopEntryToHeader(*L, *DT))
+        LI->erase(L);
+      else
+        L->moveToHeader(NewBB);
+    }
   }
 }
 

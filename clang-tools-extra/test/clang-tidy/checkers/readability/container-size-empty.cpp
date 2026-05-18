@@ -2,6 +2,7 @@
 // RUN: -config="{CheckOptions: {readability-container-size-empty.ExcludedComparisonTypes: '::std::array;::IgnoredDummyType'}}" \
 // RUN: -- -fno-delayed-template-parsing
 #include <string>
+#include <memory>
 
 namespace std {
 template <typename T> struct vector {
@@ -682,14 +683,6 @@ void instantiator() {
   instantiatedTemplateWithSizeCall<std::vector<int>>();
 }
 
-namespace std {
-template <typename T>
-struct unique_ptr {
-  T *operator->() const;
-  T &operator*() const;
-};
-} // namespace std
-
 bool call_through_unique_ptr(const std::unique_ptr<std::vector<int>> &ptr) {
   return ptr->size() > 0;
   // CHECK-MESSAGES: :[[@LINE-1]]:10: warning: the 'empty' method should be used
@@ -960,4 +953,78 @@ struct DestructorUser {
     Indexes.~DestructorContainer();
   }
 };
+}
+
+namespace GH162287 {
+
+struct Label {
+  virtual ~Label();
+};
+bool operator==(std::string, const Label&);
+bool operator==(std::string, std::vector<char>);
+bool operator==(const Label&, std::string);
+
+void testUnrelatedType() {
+  std::string s{"aa"};
+  if (s == Label{})
+    ;
+  if (s == Label())
+    ;
+  if (s == std::vector<char>{})
+    ;
+  if (Label() == s)
+    ;
+}
+
+void testValid() {
+  std::string s{"aa"};
+  std::vector<int> v;
+  Container c;
+
+  // CHECK-MESSAGES: :[[@LINE+2]]:7: warning: the 'empty' method should be used to check for emptiness instead of comparing to an empty object
+  // CHECK-FIXES:  if (s.empty())
+  if (s == std::string{})
+    ;
+  // CHECK-MESSAGES: :[[@LINE+2]]:7: warning: the 'empty' method should be used to check for emptiness instead of comparing to an empty object
+  // CHECK-FIXES:  if (s.empty())
+  if (std::string() == s)
+    ;
+  // CHECK-MESSAGES: :[[@LINE+2]]:7: warning: the 'empty' method should be used to check for emptiness instead of comparing to an empty object
+  // CHECK-FIXES:  if (c.empty())
+  if (c == Container())
+    ;
+  Container *p = nullptr;
+  // CHECK-MESSAGES: :[[@LINE+2]]:7: warning: the 'empty' method should be used to check for emptiness instead of comparing to an empty object
+  // CHECK-FIXES:  if (p->empty())
+  if (*p == Container())
+    ;
+  using MyString = std::string;
+  MyString ms{"aa"};
+  // CHECK-MESSAGES: :[[@LINE+2]]:7: warning: the 'empty' method should be used to check for emptiness instead of comparing to an empty object
+  // CHECK-FIXES:  if (ms.empty())
+  if (ms == std::string())
+    ;
+  bool b1 = s == Label();
+  // CHECK-MESSAGES: :[[@LINE+2]]:13: warning: the 'empty' method should be used to check for emptiness instead of comparing to an empty object
+  // CHECK-FIXES:  bool b2 = c.empty();
+  bool b2 = c == Container();
+  // CHECK-MESSAGES: :[[@LINE+2]]:7: warning: the 'empty' method should be used to check for emptiness instead of comparing to an empty object
+  // CHECK-FIXES:  if (v.empty())
+  if (v == std::vector<int>())
+    ;
+}
+
+template <typename T>
+bool testUnrelatedInTemplate(std::string s) {
+  return s == Label{};
+}
+template bool testUnrelatedInTemplate<int>(std::string);
+
+template <typename T>
+bool testDependentValidContainer(TemplatedContainer<T> c) {
+  return c == TemplatedContainer<T>();
+  // CHECK-MESSAGES: :[[@LINE-1]]:10: warning: the 'empty' method should be used to check for emptiness instead of comparing to an empty object
+  // CHECK-FIXES:  return c.empty();
+}
+template bool testDependentValidContainer<int>(TemplatedContainer<int>);
 }
