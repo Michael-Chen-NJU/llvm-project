@@ -45,7 +45,6 @@ def MyCombiner: GICombiner<"GenMyCombiner", [
 // CHECK-NEXT:       GIR_BuildRootMI, /*Opcode*/GIMT_Encode2(TargetOpcode::COPY),
 // CHECK-NEXT:       GIR_RootToRootCopy, /*OpIdx*/0, // root
 // CHECK-NEXT:       GIR_AddSimpleTempRegister, /*InsnID*/0, /*TempRegID*/0,
-// CHECK-NEXT:       GIR_UnsetMIFlags, /*InsnID*/0, GIMT_Encode4(MachineInstr::getPoisonGeneratingFlags()),
 // CHECK-NEXT:       GIR_EraseRootFromParent_Done,
 // CHECK-NEXT:     // Label 4: @[[L297]]
 // CHECK-NEXT:     GIM_Reject,
@@ -66,7 +65,6 @@ def MyCombiner: GICombiner<"GenMyCombiner", [
 // CHECK-NEXT:       GIR_BuildRootMI, /*Opcode*/GIMT_Encode2(TargetOpcode::COPY),
 // CHECK-NEXT:       GIR_RootToRootCopy, /*OpIdx*/0, // root
 // CHECK-NEXT:       GIR_AddSimpleTempRegister, /*InsnID*/0, /*TempRegID*/0,
-// CHECK-NEXT:       GIR_UnsetMIFlags, /*InsnID*/0, GIMT_Encode4(MachineInstr::getPoisonGeneratingFlags()),
 // CHECK-NEXT:       GIR_EraseRootFromParent_Done,
 // CHECK-NEXT:     // Label 5: @[[L343]]
 // CHECK-NEXT:     GIM_Reject,
@@ -83,7 +81,6 @@ def MyCombiner: GICombiner<"GenMyCombiner", [
 // CHECK-NEXT:       GIR_BuildRootMI, /*Opcode*/GIMT_Encode2(TargetOpcode::COPY),
 // CHECK-NEXT:       GIR_RootToRootCopy, /*OpIdx*/0, // root
 // CHECK-NEXT:       GIR_AddSimpleTempRegister, /*InsnID*/0, /*TempRegID*/0,
-// CHECK-NEXT:       GIR_UnsetMIFlags, /*InsnID*/0, GIMT_Encode4(MachineInstr::getPoisonGeneratingFlags()),
 // CHECK-NEXT:       GIR_EraseRootFromParent_Done,
 // CHECK-NEXT:     // Label 6: @[[L379]]
 // CHECK-NEXT:     GIM_Reject,
